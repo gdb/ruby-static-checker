@@ -1,0 +1,196 @@
+#!/usr/bin/env ruby
+#
+# Detect name errors in Ruby programs
+#
+# Works by first loading the Ruby code, then analyzing that.
+#
+# Obviously ruby-checker can be defeated through use of
+# method_missing, dynamic method definition, and other magical
+# magic. So don't use it on code using those paradigms.
+#
+# Architecture:
+#
+# - Load the code
+# - Make a pass through all classes to build a mapping of class names
+#   to environments
+# - Make a pass through all classes, checking each's calls to functions
+#   against the environments built in the first stage.
+
+require 'logger'
+require 'optparse'
+require 'pp'
+
+require 'rubygems'
+require 'parse_tree'
+
+$log = Logger.new(STDOUT)
+$log.level = Logger::INFO
+
+module RubyChecker
+  class Error < StandardError; end
+  class TreeError < StandardError; end
+
+  class Env
+    def initialize
+      @hash = {}
+    end
+
+    def add_method(name)
+      @hash[name] = :method
+    end
+  end
+
+  class Main
+    attr_reader :global_env
+
+    def initialize(path)
+      @path = path
+      @envs = {} # TODO: be fancier
+    end
+
+    def main
+      load_code
+      build_environments
+      # check_against_enviroments
+    end
+
+    def load_code
+      $log.info("Loading #{@path}")
+      require @path
+    end
+
+    def build_environments
+      classes_to_analyze.each do |klass|
+        env = @envs[klass.to_s.to_sym] = Env.new
+        build_environment_for_class(klass, env)
+      end
+    end
+
+    def build_environment_for_class(klass, env)
+      ast = ParseTree.translate(klass)
+      $log.info("Building enviroment for #{klass.inspect}: #{ast.pretty_inspect}")
+
+      # Should really be doing this functionally. Oh well.
+      case type = ast.shift
+      when :class
+        expect(klass.name.to_sym, ast.shift)
+        # Can't ParseTree.translate(Object) so this works
+        # TODO: link to parent's environment
+        expect([:const, klass.superclass.name.to_sym], ast.shift)
+      when :module
+        expect(klass.name.to_sym, ast.shift)
+      else
+        raise NotImplementedError.new("Unrecognized class/module type #{type.inspect}")
+      end
+      ast.each { |method| add_to_environment(method, env) }
+    end
+
+    def add_to_environment(ast, env)
+      case type = ast.shift
+      when
+      when :defn
+        name = method.shift
+        env.add_method(name)
+      else
+        raise NotImplementedError.new("Unrecognized method definition type #{type.inspect}")
+      end
+
+      expect([], method)
+    end
+
+    def classes_to_analyze
+      ObjectSpace.each_object.select { |object| object.kind_of?(Class) }
+    end
+
+    def expect(val1, val2=nil, &blk)
+      if block_given?
+        raise Error.new("Cannot call expect with a block and a second argument") unless val2.nil?
+        raise TreeError.new("Expected #{val1.inspect} did not pass the provided block") unless blk.call(val1)
+      else
+        raise TreeError.new("Expected #{val1.inspect} but #{val2.inspect} obtained") unless val1 == val2
+      end
+    end
+  end
+end
+
+
+
+
+
+
+
+
+    # def analyze_method(method, env)
+    #   expect(:defn, method.shift)
+    #   name = method.shift
+
+    #   analyze_tree(method.shift, env)
+    #   expect([], method)
+    # end
+
+    # def analyze_tree(tree, env)
+    #   case type = tree.shift
+    #   when :scope
+    #     env = env.dup
+    #     analyze_tree(tree.shift, env)
+    #   when :block
+    #     args = tree.shift
+    #     expect([:args], args) # need better expect, also need to define block params
+    #     env = env.dup
+    #     analyze_tree(tree.shift, env) while tree.length > 0
+    #   when :vcall
+    #     vcall_args = tree
+    #     name = vcall_args.shift
+    #     if env.include?(name)
+    #       $log.info("Calling defined method #{name.inspect}")
+    #     else
+    #       $log.warn("Possible name error while calling #{name.inspect}")
+    #     end
+    #   when :lasgn
+    #     var = tree.shift
+    #     env[var] = :variable
+    #     analyze_tree(tree.shift, env)
+    #   when :lit, :lvar
+    #     # TODO: add an expect
+    #     tree.shift
+    #   else
+    #     raise NotImplementedError.new("Unrecognized directive #{type.inspect} (remainder of tree is #{tree.inspect}")
+    #   end
+
+    #   expect([], tree)
+    # end
+
+def main
+  options = {}
+  optparse = OptionParser.new do |opts|
+    opts.banner = "Usage: #{$0} [options] path/to/server"
+
+    opts.on('-v', '--verbosity', 'Verbosity of debugging output') do
+      $log.level -= 1
+    end
+
+    opts.on('-h', '--help', 'Display this message') do
+      puts opts
+      exit(1)
+    end
+  end
+  optparse.parse!
+
+  if ARGV.length != 1
+    puts optparse
+    return 1
+  end
+
+  runner = RubyChecker::Main.new(*ARGV)
+  runner.main
+  return 0
+end
+
+if $0 == __FILE__
+  ret = main
+  begin
+    exit(ret)
+  rescue TypeError
+    exit(0)
+  end
+end
