@@ -31,12 +31,28 @@ module RubyChecker
   class TreeError < StandardError; end
 
   class Env
+    @@envs = {}
+
+    def self.get(name)
+      @@envs[name] ||= self.new
+    end
+
     def initialize
       @hash = {}
+      @superclass = nil
+      @mixins = []
     end
 
     def add_method(name)
       @hash[name] = :method
+    end
+
+    def set_superclass(name)
+      @superclass = name
+    end
+
+    def add_mixin(name)
+      @mixins << name
     end
   end
 
@@ -45,7 +61,6 @@ module RubyChecker
 
     def initialize(path)
       @path = path
-      @envs = {} # TODO: be fancier
     end
 
     def main
@@ -61,7 +76,7 @@ module RubyChecker
 
     def build_environments
       classes_to_analyze.each do |klass|
-        env = @envs[klass.to_s.to_sym] = Env.new
+        env = Env.get(klass.to_s.to_sym)
         build_environment_for_class(klass, env)
       end
     end
@@ -75,8 +90,8 @@ module RubyChecker
       when :class
         expect(klass.name.to_sym, ast.shift)
         # Can't ParseTree.translate(Object) so this works
-        # TODO: link to parent's environment
         expect([:const, klass.superclass.name.to_sym], ast.shift)
+        env.set_superclass(klass.superclass.name)
       when :module
         expect(klass.name.to_sym, ast.shift)
       else
@@ -87,15 +102,30 @@ module RubyChecker
 
     def add_to_environment(ast, env)
       case type = ast.shift
-      when
       when :defn
-        name = method.shift
+        name = ast.shift
         env.add_method(name)
+        # Remainder is a list of expressions
+        ast = []
+      when :call
+        # TODO: clean this up a lot
+        expect(nil, ast.shift)
+        expect(:include, ast.shift)
+        arglist = ast.shift
+        expect(:arglist, arglist.shift)
+        const_exp = arglist.shift
+        expect([], arglist)
+
+        expect(:const, const_exp.shift)
+        name = const_exp.shift
+        expect([], const_exp)
+
+        env.add_mixin(name)
       else
         raise NotImplementedError.new("Unrecognized method definition type #{type.inspect}")
       end
 
-      expect([], method)
+      expect([], ast)
     end
 
     def classes_to_analyze
