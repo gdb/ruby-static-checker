@@ -42,7 +42,7 @@ Ruby-static-checker can find bugs like in the following (contrived) example:
 
 ```ruby
 class A
-  def foo
+  def self.foo
     baz = 1
     # Whoops, typod 'baz'!
     puts bas
@@ -50,11 +50,11 @@ class A
 end
 ```
 
-The output of this should be:
+The output of this should be (yes, I know, this output could be way better):
 
 ```shell
 gdb@fire-hazard:~$ ruby-static-checker /path/to/a.rb
-Possible name error while calling A<instance>.bas
+Possible name error while calling A.bas
 ```
 
 The current implementation is very barebones. It does have some false
