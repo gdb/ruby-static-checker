@@ -62,9 +62,15 @@ module RubyChecker
     def add_instance_method(name)
       @instance[name] = :method
     end
+    def instance_method?(name)
+      !!@instance[name]
+    end
 
     def add_class_method(name)
       @class[name] = :method
+    end
+    def class_method?(name)
+      !!@class[name]
     end
 
     def set_superclass(name)
@@ -76,6 +82,7 @@ module RubyChecker
     end
 
     def defined?(var, klass_context)
+      # TODO: watch out for method_missing
       return true if builtins.include?(var)
       return true if klass_context && builtin_class_methods.include?(var)
 
@@ -89,6 +96,14 @@ module RubyChecker
 
       delegators.compact.any? do |parent|
         self.class.get_and_populate(parent).defined?(var, klass_context)
+      end
+    end
+
+    def pretty_call(name, klass_context)
+      if klass_context
+        "#{@me}.#{name}"
+      else
+        "#{@me}<instance>.#{name}"
       end
     end
 
@@ -116,7 +131,6 @@ module RubyChecker
     end
 
     def main
-
       load_code
       # build_environments
       check_against_environments
@@ -162,14 +176,6 @@ module RubyChecker
     def symbolize(name)
       name == '' ? :nil : name.to_sym
     end
-
-    def method_call(klass, name, klass_context)
-      if klass_context
-        "#{klass}.#{name}"
-      else
-        "#{klass}<instance>.#{name}"
-      end
-    end
   end
 
   module Analyzer
@@ -182,11 +188,10 @@ module RubyChecker
 
     def self.build_environment_for_class(klass, env)
       # TODO: should probably just do this for everything
-      if klass == Object
-        Object.instance_methods.each { |name| env.add_instance_method(name.to_sym) }
-        Object.methods.each { |name| env.add_class_method(name.to_sym) }
-        return
-      end
+      (['initialize'] + klass.instance_methods).each { |name| env.add_instance_method(name.to_sym) }
+      klass.methods.each { |name| env.add_class_method(name.to_sym) }
+
+      return if klass == Object
 
       ast = ParseTree.translate(klass)
       $log.debug("Building enviroment for #{klass.inspect}: #{ast.pretty_inspect}")
@@ -222,12 +227,18 @@ module RubyChecker
       case type = ast.shift
       when :defn
         name = ast.shift
-        env.add_instance_method(name)
+        unless env.instance_method?(name)
+          $log.info("Definition for #{env.pretty_call(name, false)} found, but it is not listend as an instance method")
+          env.add_instance_method(name)
+        end
         ast.shift
       when :defs
         expect([:self], ast.shift)
         name = ast.shift
-        env.add_class_method(name)
+        unless env.class_method?(name)
+          $log.info("Definition for #{env.pretty_call(name, true)} found, but it is not listend as a class method")
+          env.add_class_method(name)
+        end
         ast.shift
       when :call
         # TODO: clean this up a lot
@@ -622,11 +633,10 @@ module RubyChecker
       when :vcall, :fcall
         vcall_args = tree
         name = vcall_args.shift
-        call = method_call(env.me, name, klass_context)
         if env.defined?(name, klass_context)
-          $log.info "Calling defined method #{call}"
+          $log.info "Calling defined method #{env.pretty_call(name, klass_context)}"
         else
-          puts "Possible name error while calling #{call}"
+          puts "Possible name error while calling #{env.pretty_call(name, klass_context)}"
         end
         check_method_body(vcall_args.shift, klass_context, env) while vcall_args.length > 0
       when :when
