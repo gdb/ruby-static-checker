@@ -15,13 +15,16 @@
 #   to environments
 # - Make a pass through all classes, checking each's calls to functions
 #   against the environments built in the first stage.
-
+#
+# Notes: how does ParseTree deal with extends?
 require 'logger'
 require 'optparse'
 require 'pp'
 
 require 'rubygems'
 require 'parse_tree'
+
+require File.join(File.dirname(__FILE__), '../lib/ruby-checker')
 
 $log = Logger.new(STDOUT)
 $log.level = Logger::INFO
@@ -33,18 +36,32 @@ module RubyChecker
   class Env
     @@envs = {}
 
-    def self.get(name)
-      @@envs[name] ||= self.new
+    def self.get_and_populate(klass)
+      env = get(klass)
+      Analyzer.build_environment_for_class(klass, env) unless env.populated?
+      env
+    end
+
+    def self.get(klass)
+      @@envs[klass] ||= self.new
     end
 
     def initialize
-      @hash = {}
+      @instance = {}
+      @class = {}
       @superclass = nil
       @mixins = []
     end
 
-    def add_method(name)
-      @hash[name] = :method
+    def mark_populated!; @populated = true; end
+    def populated?; @populated; end
+
+    def add_instance_method(name)
+      @instance[name] = :method
+    end
+
+    def add_class_method(name)
+      @class[name] = :method
     end
 
     def set_superclass(name)
@@ -53,6 +70,20 @@ module RubyChecker
 
     def add_mixin(name)
       @mixins << name
+    end
+
+    def defined?(var, klass_context)
+      if klass_context
+        return true if @class[var]
+        delegators = [@superclass]
+      else
+        return true if @instance[var]
+        delegators = [@superclass] + @mixins
+      end
+
+      delegators.compact.any? do |parent|
+        self.class.get_and_populate(parent).defined?(var, klass_context)
+      end
     end
   end
 
@@ -65,8 +96,8 @@ module RubyChecker
 
     def main
       load_code
-      build_environments
-      # check_against_enviroments
+      # build_environments
+      check_against_environments
     end
 
     def load_code
@@ -74,64 +105,25 @@ module RubyChecker
       require @path
     end
 
+    # TODO: write this with some cooler pattern-matching
     def build_environments
+      classes_to_analyze.each { |klass| Analyzer.analyze_class(klass) }
+    end
+
+    def check_against_environments
       classes_to_analyze.each do |klass|
-        env = Env.get(klass.to_s.to_sym)
-        build_environment_for_class(klass, env)
+        Checker.check_for_name_errors(klass)
       end
-    end
-
-    def build_environment_for_class(klass, env)
-      ast = ParseTree.translate(klass)
-      $log.info("Building enviroment for #{klass.inspect}: #{ast.pretty_inspect}")
-
-      # Should really be doing this functionally. Oh well.
-      case type = ast.shift
-      when :class
-        expect(klass.name.to_sym, ast.shift)
-        # Can't ParseTree.translate(Object) so this works
-        expect([:const, klass.superclass.name.to_sym], ast.shift)
-        env.set_superclass(klass.superclass.name)
-      when :module
-        expect(klass.name.to_sym, ast.shift)
-      else
-        raise NotImplementedError.new("Unrecognized class/module type #{type.inspect}")
-      end
-      ast.each { |method| add_to_environment(method, env) }
-    end
-
-    def add_to_environment(ast, env)
-      case type = ast.shift
-      when :defn
-        name = ast.shift
-        env.add_method(name)
-        # Remainder is a list of expressions
-        ast = []
-      when :call
-        # TODO: clean this up a lot
-        expect(nil, ast.shift)
-        expect(:include, ast.shift)
-        arglist = ast.shift
-        expect(:arglist, arglist.shift)
-        const_exp = arglist.shift
-        expect([], arglist)
-
-        expect(:const, const_exp.shift)
-        name = const_exp.shift
-        expect([], const_exp)
-
-        env.add_mixin(name)
-      else
-        raise NotImplementedError.new("Unrecognized method definition type #{type.inspect}")
-      end
-
-      expect([], ast)
     end
 
     def classes_to_analyze
-      ObjectSpace.each_object.select { |object| object.kind_of?(Class) }
+      ObjectSpace.each_object.select do |object|
+        object.kind_of?(Class) && object != Object
+      end
     end
+  end
 
+  module Util
     def expect(val1, val2=nil, &blk)
       if block_given?
         raise Error.new("Cannot call expect with a block and a second argument") unless val2.nil?
@@ -140,55 +132,207 @@ module RubyChecker
         raise TreeError.new("Expected #{val1.inspect} but #{val2.inspect} obtained") unless val1 == val2
       end
     end
+
+    def symbolize(name)
+      name == '' ? :nil : name.to_sym
+    end
+  end
+
+  module Analyzer
+    extend Util
+
+    def self.analyze_class(klass)
+      env = Env.get(klass)
+      build_environment_for_class(klass, env)
+    end
+
+    def self.build_environment_for_class(klass, env)
+      # TODO: should probably just do this for everything
+      if klass == Object
+        Object.instance_methods.each { |name| env.add_instance_method(name.to_sym) }
+        Object.methods.each { |name| env.add_class_method(name.to_sym) }
+        return
+      end
+
+      ast = ParseTree.translate(klass)
+      $log.info("Building enviroment for #{klass.inspect}: #{ast.pretty_inspect}")
+
+      # Should really be doing this functionally. Oh well.
+      case type = ast.shift
+      when :class
+        # Apparently some classes (e.g. Tempfile's superclass) can
+        # have empty string names. We are currently using a name-based
+        # system; may want to switch to object-based in the future.
+        expect(ast.shift) do |value|
+          if klass.name.length > 0
+            klass.name.to_sym == value
+          else
+            value == :nil || value.to_s =~ /^UnnamedClass_\d+$/
+          end
+        end
+        # Can't ParseTree.translate(Object) so this works. This may
+        # also need the UnnamedClass logic.
+        expect([:const, symbolize(klass.superclass.name)], ast.shift)
+        env.set_superclass(klass.superclass)
+      when :module
+        expect(klass.name.to_sym, ast.shift)
+      else
+        raise NotImplementedError.new("Unrecognized class/module type #{type.inspect}")
+      end
+      ast.each { |method| add_to_environment(method, env) }
+
+      env.mark_populated!
+    end
+
+    def self.add_to_environment(ast, env)
+      case type = ast.shift
+      when :defn
+        name = ast.shift
+        env.add_instance_method(name)
+        # Remainder is a list of expressions
+        ast = []
+      when :defs
+        expect([:self], ast.shift)
+        name = ast.shift
+        env.add_class_method(name)
+        # Remainder is a list of expressions
+        ast = []
+      when :call
+        # TODO: clean this up a lot
+        expect(nil, ast.shift)
+        expect(:include, ast.shift)
+        arglist = ast.shift
+        expect(:arglist, arglist.shift)
+        mixin_name = get_nested_name(arglist.shift)
+        mixin = fetch_class(mixin_name)
+        expect([], arglist)
+        env.add_mixin(mixin)
+      else
+        raise NotImplementedError.new("Unrecognized method definition type #{type.inspect}")
+      end
+
+      expect([], ast)
+    end
+
+    def self.get_nested_name(ast)
+      case type = ast.shift
+      when :colon2
+        namespace = get_nested_name(ast.shift)
+        name = ast.shift
+        res = "#{namespace}::#{name}".to_sym
+      when :const
+        res = ast.shift
+      else
+        raise NotImplementedError.new("Unrecognized class nesting construct #{type.inspect}")
+      end
+
+      expect([], ast)
+      res
+    end
+  end
+
+  module Checker
+    extend Util
+
+    def self.check_for_name_errors(klass)
+      env = Env.get_and_populate(klass)
+      check_class_against_environment(klass, env)
+    end
+
+    def self.check_class_against_environment(klass, env)
+      ast = ParseTree.translate(klass)
+      $log.info("Checking for name errors for #{klass.inspect}: #{ast.pretty_inspect}")
+
+      case type = ast.shift
+      when :class
+        expect(ast.shift) do |value|
+          if klass.name.length > 0
+            klass.name.to_sym == value
+          else
+            value == :nil || value.to_s =~ /^UnnamedClass_\d+$/
+          end
+        end
+        expect([:const, symbolize(klass.superclass.name)], ast.shift)
+      when :module
+        expect(klass.name.to_sym, ast.shift)
+      else
+        raise NotImplementedError.new("Unrecognized class/module type #{type.inspect}")
+      end
+      ast.each { |method| check_method_against_environment(method, env) }
+
+      env.mark_populated!
+    end
+
+    def self.check_method_against_environment(ast, env)
+      case type = ast.shift
+      when :defn
+        name = ast.shift
+        check_method_body(ast.shift, false, env)
+      when :defs
+        expect([:self], ast.shift)
+        name = ast.shift
+        # Remainder is a list of expressions
+        check_method_body(ast.shift, true, env)
+      when :call
+        # Who cares about mixins
+        ast = []
+      else
+        raise NotImplementedError.new("Unrecognized method definition type #{type.inspect}")
+      end
+
+      expect([], ast)
+    end
+
+    def self.check_method_body(tree, klass_context, env)
+      case type = tree.shift
+      when :scope
+        check_method_body(tree.shift, klass_context, env)
+      when :block
+        # Huge hack:
+        # >> module A; def foo(a,b,c=1); end; end
+        # => nil
+        # >> ParseTree.translate A
+        # => [:module, :A, [:defn, :foo, [:scope, [:block, [:args, :a, :b, :c, [:block, [:lasgn, :c, [:lit, 1]]]], [:nil]]]]]
+        args = tree.shift
+        expect(:args, args[0])
+        # while (var = args.shift).kind_of?(sym)
+        #   env.add_local_variable(var)
+        # end
+        check_method_body(tree.shift, klass_context, env) while tree.length > 0
+      when :vcall
+        vcall_args = tree
+        name = vcall_args.shift
+        if env.defined?(name, klass_context)
+          $log.info("Calling defined method #{name.inspect}")
+        else
+          $log.warn("Possible name error while calling #{name.inspect}")
+        end
+      when :call, :attrasgn
+        # [:call, [:gvar, :$!]
+        # [[:const, :Logger], :new, [:array, [:const, :STDERR]]]
+        $log.warn('TODO: look for undefined method calls')
+        obj = tree.shift
+        method = tree.shift
+        # arglist
+        tree = []
+      when :const
+        $log.warn('TODO: look for defined constants')
+        tree.shift
+      when :lasgn, :iasgn
+        var = tree.shift
+        # env[var] = :variable
+        check_method_body(tree.shift, klass_context, env)
+      when :lit, :lvar, :ivar
+        # TODO: add an expect
+        tree.shift
+      else
+        raise NotImplementedError.new("Unrecognized directive #{type.inspect} (remainder of tree is #{tree.inspect}")
+      end
+
+      expect([], tree)
+    end
   end
 end
-
-
-
-
-
-
-
-
-    # def analyze_method(method, env)
-    #   expect(:defn, method.shift)
-    #   name = method.shift
-
-    #   analyze_tree(method.shift, env)
-    #   expect([], method)
-    # end
-
-    # def analyze_tree(tree, env)
-    #   case type = tree.shift
-    #   when :scope
-    #     env = env.dup
-    #     analyze_tree(tree.shift, env)
-    #   when :block
-    #     args = tree.shift
-    #     expect([:args], args) # need better expect, also need to define block params
-    #     env = env.dup
-    #     analyze_tree(tree.shift, env) while tree.length > 0
-    #   when :vcall
-    #     vcall_args = tree
-    #     name = vcall_args.shift
-    #     if env.include?(name)
-    #       $log.info("Calling defined method #{name.inspect}")
-    #     else
-    #       $log.warn("Possible name error while calling #{name.inspect}")
-    #     end
-    #   when :lasgn
-    #     var = tree.shift
-    #     env[var] = :variable
-    #     analyze_tree(tree.shift, env)
-    #   when :lit, :lvar
-    #     # TODO: add an expect
-    #     tree.shift
-    #   else
-    #     raise NotImplementedError.new("Unrecognized directive #{type.inspect} (remainder of tree is #{tree.inspect}")
-    #   end
-
-    #   expect([], tree)
-    # end
 
 def main
   options = {}

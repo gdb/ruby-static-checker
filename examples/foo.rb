@@ -6,6 +6,7 @@ class A
 
   def bar
     foo
+    private_methods
   end
 
   def car
@@ -17,6 +18,11 @@ end
 module B
   def foo
     a
+    instance_bar
+  end
+
+  def instance_bar
+    baz
   end
 
   def self.bar
