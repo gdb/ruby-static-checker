@@ -25,12 +25,12 @@ require 'set'
 require 'rubygems'
 require 'parse_tree'
 
-require File.join(File.dirname(__FILE__), '../lib/ruby-checker')
+require File.join(File.dirname(__FILE__), '../lib/ruby-static-checker')
 
 $log = Logger.new(STDOUT)
 $log.level = Logger::WARN
 
-module RubyChecker
+module RubyStaticChecker
   class Error < StandardError; end
   class TreeError < StandardError; end
 
@@ -703,7 +703,7 @@ end
 def main
   options = {}
   optparse = OptionParser.new do |opts|
-    opts.banner = "Usage: #{$0} [options] path/to/server"
+    opts.banner = "Usage: #{$0} [options] path/to/code"
 
     opts.on('-v', '--verbosity', 'Verbosity of debugging output') do
       $log.level -= 1
@@ -721,7 +721,7 @@ def main
     return 1
   end
 
-  runner = RubyChecker::Main.new(*ARGV)
+  runner = RubyStaticChecker::Main.new(*ARGV)
   runner.main
   return 0
 end
