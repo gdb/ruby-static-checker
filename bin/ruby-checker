@@ -264,6 +264,8 @@ module RubyChecker
     end
 
     def self.check_method_against_environment(ast, env)
+      $log.info("Checking method #{ast.inspect}")
+
       case type = ast.shift
       when :defn
         name = ast.shift
@@ -285,8 +287,6 @@ module RubyChecker
 
     def self.check_method_body(tree, klass_context, env)
       case type = tree.shift
-      when :scope
-        check_method_body(tree.shift, klass_context, env)
       when :block
         # Huge hack:
         # >> module A; def foo(a,b,c=1); end; end
@@ -299,14 +299,6 @@ module RubyChecker
         #   env.add_local_variable(var)
         # end
         check_method_body(tree.shift, klass_context, env) while tree.length > 0
-      when :vcall
-        vcall_args = tree
-        name = vcall_args.shift
-        if env.defined?(name, klass_context)
-          $log.info("Calling defined method #{name.inspect}")
-        else
-          $log.warn("Possible name error while calling #{name.inspect}")
-        end
       when :call, :attrasgn
         # [:call, [:gvar, :$!]
         # [[:const, :Logger], :new, [:array, [:const, :STDERR]]]
@@ -318,13 +310,23 @@ module RubyChecker
       when :const
         $log.warn('TODO: look for defined constants')
         tree.shift
+      when :ivar, :lit, :lvar
+        # TODO: add an expect
+        tree.shift
       when :lasgn, :iasgn
         var = tree.shift
         # env[var] = :variable
         check_method_body(tree.shift, klass_context, env)
-      when :lit, :lvar, :ivar
-        # TODO: add an expect
-        tree.shift
+      when :scope
+        check_method_body(tree.shift, klass_context, env)
+      when :vcall
+        vcall_args = tree
+        name = vcall_args.shift
+        if env.defined?(name, klass_context)
+          $log.info("Calling defined method #{name.inspect}")
+        else
+          $log.warn("Possible name error while calling #{name.inspect}")
+        end
       else
         raise NotImplementedError.new("Unrecognized directive #{type.inspect} (remainder of tree is #{tree.inspect}")
       end
