@@ -287,17 +287,59 @@ module RubyChecker
 
     def self.check_method_body(tree, klass_context, env)
       case type = tree.shift
+      when :and, :or, :op_asgn_and, :op_asgn_or
+        # Not sure how :op_asgn_or differs from :or
+        # >> class A; def foo; a && b && c; end; end
+        # => nil
+        # >> ParseTree.translate A, :foo
+        # => [:defn, :foo, [:scope, [:block, [:args], [:and, [:vcall, :a], [:and, [:vcall, :b], [:vcall, :c]]]]]]
+        a = tree.shift
+        b = tree.shift
+        check_method_body(a, klass_context, env)
+        check_method_body(b, klass_context, env)
+      when :args
+        # No idea what this is
+        # [:defs, [:self], :incompatible_argument_styles, [:scope, [:args, :*]]]
+        expect(:*, tree.shift)
+      when :argscat, :op_asgn1
+        # No idea what this is
+        while tree.length > 0
+          case elt = tree.shift
+          when Symbol: next
+          when Array: check_method_body(elt, klass_context, env)
+          else
+            raise "Unrecognized elt #{elt.inspect}"
+          end
+        end
+      when :array, :hash
+        check_method_body(tree.shift, klass_context, env) while tree.length > 0
+      when :attrset
+        # Not really sure what this one is, but ok
+        # [:defn, :datetime_format=, [:attrset, :@datetime_format]]
+        expect(tree.shift) { |value| value.kind_of?(Symbol) && value.to_s.start_with?('@') }
       when :block
         # Huge hack:
         # >> module A; def foo(a,b,c=1); end; end
         # => nil
         # >> ParseTree.translate A
         # => [:module, :A, [:defn, :foo, [:scope, [:block, [:args, :a, :b, :c, [:block, [:lasgn, :c, [:lit, 1]]]], [:nil]]]]]
-        args = tree.shift
-        expect(:args, args[0])
-        # while (var = args.shift).kind_of?(sym)
-        #   env.add_local_variable(var)
-        # end
+        tree.shift if (args = tree[0]) && (args[0] == :args)
+        check_method_body(tree.shift, klass_context, env) while tree.length > 0
+      when :block_arg
+        # TODO: add an expect? Do something useful with types?
+        # [:defn, :log, [:scope, [:block, [:args, :severity, :message, [:block, [:lasgn, :message, [:nil]]]], [:block_arg, :block], [:if, [:ivar, :@log], [:block_pass, [:lvar, :block], [:call, [:ivar, :@log], :add, [:array, [:lvar, :severity], [:lvar, :message], [:ivar, :@appname]]]], nil]]]]
+        tree.shift
+      when :block_pass
+        # >> class A; def foo; bar(&blk); end; end
+        # => nil
+        # >> ParseTree.translate A
+        # => [:class, :A, [:const, :Object], [:defn, :foo, [:scope, [:block, [:args], [:block_pass, [:vcall, :blk], [:fcall, :bar]]]]]]
+        block = tree.shift
+        fcall = tree.shift
+        check_method_body(block, klass_context, env)
+        check_method_body(fcall, klass_context, env)
+      when :bmethod
+        # No idea what this is
         check_method_body(tree.shift, klass_context, env) while tree.length > 0
       when :call, :attrasgn
         # [:call, [:gvar, :$!]
@@ -307,19 +349,203 @@ module RubyChecker
         method = tree.shift
         # arglist
         tree = []
+      when :case
+        # >> class A; def foo;  case 1; when 2: 3; else; 4; end; end; end
+        # => nil
+        # >> ParseTree.translate A, :foo
+        # => [:defn, :foo, [:scope, [:block, [:args], [:case, [:lit, 1], [:when, [:array, [:lit, 2]], [:lit, 3]], [:lit, 4]]]]]
+        value = tree.shift
+        check_method_body(value, klass_context, env) if value
+        while tree.length > 0
+          when_spec = tree.shift
+          # As long as it's not the else statement
+          expect(:when, when_spec[0]) if tree.length > 0
+          check_method_body(when_spec, klass_context, env) if when_spec
+        end
+      when :cfunc
+        # Call a C function, I think
+        addr = tree.shift
+        arg = tree.shift
+        expect(addr) { |value| value.kind_of?(Numeric) }
+        expect(arg) { |value| value.kind_of?(Numeric) }
+      when :colon2
+        $log.warn('TODO: look for defined nested constants')
+        nested = tree.shift
+        namespace = tree.shift
+        check_method_body(nested, klass_context, env)
+      when :colon3
+        # >> class A; def foo; ::String; end; end
+        # => nil
+        # >> ParseTree.translate A, :foo
+        # => [:defn, :foo, [:scope, [:block, [:args], [:colon3, :String]]]]
+        $log.warn('TODO: look for defined toplevel constants')
+        tree.shift
       when :const
         $log.warn('TODO: look for defined constants')
         tree.shift
+      when :cvar
+        expect(tree.shift) { |value| value.kind_of?(Symbol) && value.to_s.start_with?('@@') }
+      when :dasgn, :dasgn_curr, :dvar
+        # Not really sure what these are
+        # [:defn, :find, [:scope, [:block, [:args, :glob], [:iter, [:call, [:ivar, :@gemspecs], :find], [:dasgn_curr, :spec], [:fcall, :matching_file?, [:array, [:dvar, :spec], [:lvar, :glob]]]]]]]
+        expect(tree.shift) { |value| value.kind_of?(Symbol) }
+        check_method_body(tree.shift, klass_context, env) while tree.length > 0
+      when :defined, :not
+        value = tree.shift
+        check_method_body(value, klass_context, env)
+      when :dregx
+        # Not really sure what an integer here means
+        # [:dregx, "^", [:evstr, [:lvar, :gem_pattern]], 1]
+        while tree.length > 0
+          case string_component = tree.shift
+          when String: next
+          when Numeric: next
+          when Array: check_method_body(string_component, klass_context, env)
+          else
+            raise "Unrecognized type of string component #{string_component.inspect}"
+          end
+        end
+      when :dstr, :dsym, :dxstr
+        # Not sure what diff between dxstr and dstr is
+        # [:dstr, "Start of ", [:evstr, [:ivar, :@appname]], [:str, "."]]]]
+        # [:dxstr, "", [:evstr, [:lvar, :cmd]]]
+        while tree.length > 0
+          case string_component = tree.shift
+          when String: next
+          when Array: check_method_body(string_component, klass_context, env)
+          else
+            raise "Unrecognized type of string component #{string_component.inspect}"
+          end
+        end
+      when :ensure
+        # >> class A; def foo; begin; 1; ensure 2; end; end; end
+        # => nil
+        # >> ParseTree.translate A
+        # => [:class, :A, [:const, :Object], [:defn, :foo, [:scope, [:block, [:args], [:ensure, [:lit, 1], [:lit, 2]]]]]]
+        begin_block = tree.shift
+        ensure_block = tree.shift
+        check_method_body(begin_block, klass_context, env)
+        check_method_body(ensure_block, klass_context, env)
+      when :evstr
+        # >> class A; def foo; "#{a + b}"; end; end
+        # => nil
+        # >> ParseTree.translate A
+        # => [:class, :A, [:const, :Object], [:defn, :foo, [:scope, [:block, [:args], [:dstr, "", [:evstr, [:call, [:vcall, :a], :+, [:array, [:vcall, :b]]]]]]]]]
+        # TODO: might have multiple possible args
+        arg = tree.shift
+        check_method_body(arg, klass_context, env)
+      when :false, :nil, :true
+      when :fbody
+        # Not really sure what this is
+        body = tree.shift
+        check_method_body(body, klass_context, env)
+      when :for, :iter
+        # Not actually sure what an iter is, but NODE_ITER and NODE_FOR use
+        # the same code in Ruby
+        # >> class A; def foo; for i in j; 2; end; end; end
+        # => nil
+        # >> ParseTree.translate A, :foo
+        # => [:defn, :foo, [:scope, [:block, [:args], [:for, [:vcall, :j], [:lasgn, :i], [:lit, 2]]]]]
+        value = tree.shift
+        holder = tree.shift
+        body = tree.shift
+        check_method_body(value, klass_context, env)
+        check_method_body(holder, klass_context, env) if holder
+        check_method_body(body, klass_context, env)
+      when :gasgn
+        # Global assign
+        name = tree.shift
+        assigned = tree.shift
+        expect(name) { |value| value.kind_of?(Symbol) && value.to_s.start_with?('$') }
+        # Not sure what assigned being nil means, but ok.
+        check_method_body(assigned, klass_context, env) if assigned
+      when :gvar
+        # Global variable
+        name = tree.shift
+        expect(name) { |value| value.kind_of?(Symbol) && value.to_s.start_with?('$') }
+      when :if
+        predicate = tree.shift
+        positive = tree.shift
+        negative = tree.shift
+        check_method_body(predicate, klass_context, env)
+        check_method_body(positive, klass_context, env) if positive
+        check_method_body(negative, klass_context, env) if negative
       when :ivar, :lit, :lvar
         # TODO: add an expect
         tree.shift
       when :lasgn, :iasgn
         var = tree.shift
-        # env[var] = :variable
-        check_method_body(tree.shift, klass_context, env)
+        value = tree.shift
+        check_method_body(value, klass_context, env) if value
+      when :masgn
+        # Not reaaally sure what this is. Probably something with
+        # pattern-matching.
+        a = tree.shift
+        b = tree.shift
+        c = tree.shift
+        check_method_body(a, klass_context, env) if a
+        check_method_body(b, klass_context, env) if b
+        check_method_body(c, klass_context, env) if c
+      when :match2, :match3
+        # What is the difference between match2 and match3? Who knows.
+        regex = tree.shift
+        value = tree.shift
+        check_method_body(regex, klass_context, env)
+        check_method_body(value, klass_context, env)
+      when :nth_ref
+        # No idea what this is
+        expect(tree.shift) { |value| value.kind_of?(Integer) }
+      when :resbody
+        # >> class A; def foo; begin 1; rescue Exception => e; 2; end; end; end
+        # => nil
+        # >> ParseTree.translate A, :foo
+        # => [:defn, :foo, [:scope, [:block, [:args], [:rescue, [:lit, 1], [:resbody, [:array, [:const, :Exception]], [:block, [:lasgn, :e, [:gvar, :$!]], [:lit, 2]]]]]]]
+        exception_type = tree.shift
+        rescue_body = tree.shift
+        # Not sure what this is... else of some sort?
+        other_body = tree.shift
+        check_method_body(exception_type, klass_context, env) if exception_type
+        check_method_body(rescue_body, klass_context, env) if rescue_body
+        check_method_body(other_body, klass_context, env) if other_body
+      when :rescue
+        # >> class A; def foo; begin; 1; rescue 2; end; end; end
+        # => nil
+        # >> ParseTree.translate A
+        # => [:class, :A, [:const, :Object], [:defn, :foo, [:scope, [:block, [:args], [:rescue, [:lit, 1], [:resbody, [:array, [:lit, 2]]]]]]]]
+        begin_block = tree.shift
+        rescue_block = tree.shift
+        else_block = tree.shift
+        expect(:resbody, rescue_block[0])
+        check_method_body(begin_block, klass_context, env)
+        check_method_body(rescue_block, klass_context, env)
+        check_method_body(else_block, klass_context, env) if else_block
+      when :retry
+      when :return
+        value = tree.shift
+        check_method_body(value, klass_context, env) if value
       when :scope
         check_method_body(tree.shift, klass_context, env)
-      when :vcall
+      when :self, :zarray
+        # >> class A; def foo; []; end; end
+        # => nil
+        # >> ParseTree.translate A, :foo
+        # => [:defn, :foo, [:scope, [:block, [:args], [:zarray]]]]
+      when :splat
+        check_method_body(tree.shift, klass_context, env) while tree.length > 0
+      when :str
+        str = tree.shift
+        expect(true, str.kind_of?(String))
+      when :super, :yield, :next, :break
+        # >> class A; def foo; super(a, b); end; end
+        # => nil
+        # >> ParseTree.translate A, :foo
+        # => [:defn, :foo, [:scope, [:block, [:args], [:super, [:array, [:vcall, :a], [:vcall, :b]]]]]]
+        arg = tree.shift
+        check_method_body(arg, klass_context, env) if arg
+      when :to_ary
+        arg = tree.shift
+        check_method_body(arg, klass_context, env)
+      when :vcall, :fcall
         vcall_args = tree
         name = vcall_args.shift
         if env.defined?(name, klass_context)
@@ -327,6 +553,25 @@ module RubyChecker
         else
           $log.warn("Possible name error while calling #{name.inspect}")
         end
+        check_method_body(vcall_args.shift, klass_context, env) while vcall_args.length > 0
+      when :when
+        comparison = tree.shift
+        body = tree.shift
+        check_method_body(comparison, klass_context, env)
+        check_method_body(body, klass_context, env) if body
+      when :while, :until
+        # >> class A; def foo; while 1; 2; end; end; end
+        # => nil
+        # >> ParseTree.translate A, :foo
+        # => [:defn, :foo, [:scope, [:block, [:args], [:while, [:lit, 1], [:lit, 2], true]]]]
+        condition = tree.shift
+        body = tree.shift
+        # TODO: figure out what this is actually used for
+        expect(tree.shift) { |value| value == true || value == false }
+        check_method_body(condition, klass_context, env)
+        check_method_body(body, klass_context, env)
+      when :zsuper
+        # Dunno what this is
       else
         raise NotImplementedError.new("Unrecognized directive #{type.inspect} (remainder of tree is #{tree.inspect}")
       end
