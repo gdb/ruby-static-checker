@@ -726,11 +726,9 @@ def main
   return 0
 end
 
-if $0 == __FILE__
-  ret = main
-  begin
-    exit(ret)
-  rescue TypeError
-    exit(0)
-  end
+ret = main
+begin
+  exit(ret)
+rescue TypeError
+  exit(0)
 end
