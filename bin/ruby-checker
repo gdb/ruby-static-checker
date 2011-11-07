@@ -20,6 +20,7 @@
 require 'logger'
 require 'optparse'
 require 'pp'
+require 'set'
 
 require 'rubygems'
 require 'parse_tree'
@@ -75,6 +76,9 @@ module RubyChecker
     end
 
     def defined?(var, klass_context)
+      return true if builtins.include?(var)
+      return true if klass_context && builtin_class_methods.include?(var)
+
       if klass_context
         return true if @class[var]
         delegators = [@superclass]
@@ -86,6 +90,20 @@ module RubyChecker
       delegators.compact.any? do |parent|
         self.class.get_and_populate(parent).defined?(var, klass_context)
       end
+    end
+
+    private
+
+    def builtins
+      Set.new([:raise, :Integer, :Array, :warn, :block_given?, :lambda,
+               :print, :puts, :sprintf, :eval, :caller, :select, :extend,
+               :include, :require, :loop, :format, :sleep])
+    end
+
+    def builtin_class_methods
+      # TODO: this includes some private methods, maybe should distinguish
+      Set.new([:attr_writer, :attr_reader, :attr_accessor, :const_set, :define_method,
+               :remove_const, :remove_method])
     end
   end
 
