@@ -1,3 +1,10 @@
+# SAMPLE OUTPUT:
+# gdb@fire-hazard:~$ ruby-static-checker ./foo.rb
+# Possible name error while calling B<instance>.a
+# Possible name error while calling B<instance>.baz
+# Possible name error while calling B.a
+# Possible name error while calling A<instance>.c
+
 class A
   def foo
     a = 1
