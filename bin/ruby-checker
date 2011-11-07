@@ -223,14 +223,12 @@ module RubyChecker
       when :defn
         name = ast.shift
         env.add_instance_method(name)
-        # Remainder is a list of expressions
-        ast = []
+        ast.shift
       when :defs
         expect([:self], ast.shift)
         name = ast.shift
         env.add_class_method(name)
-        # Remainder is a list of expressions
-        ast = []
+        ast.shift
       when :call
         # TODO: clean this up a lot
         expect(nil, ast.shift)
@@ -307,7 +305,6 @@ module RubyChecker
       when :defs
         expect([:self], ast.shift)
         name = ast.shift
-        # Remainder is a list of expressions
         check_method_body(ast.shift, true, env)
       when :call
         # Who cares about mixins
@@ -345,12 +342,24 @@ module RubyChecker
             raise "Unrecognized elt #{elt.inspect}"
           end
         end
+      when :alias
+        # TODO: make sure target actually is defined if it's a lit
+        # >> class A; def foo; alias :a :b; end; end
+        # => nil
+        # >> ParseTree.translate A, :foo
+        # => [:defn, :foo, [:scope, [:block, [:args], [:alias, [:lit, :a], [:lit, :b]]]]]
+        source = tree.shift
+        target = tree.shift
+        check_method_body(source, klass_context, env)
+        check_method_body(target, klass_context, env)
       when :array, :hash
         check_method_body(tree.shift, klass_context, env) while tree.length > 0
       when :attrset
         # Not really sure what this one is, but ok
         # [:defn, :datetime_format=, [:attrset, :@datetime_format]]
         expect(tree.shift) { |value| value.kind_of?(Symbol) && value.to_s.start_with?('@') }
+      when :back_ref
+        expect(:&, tree.shift)
       when :block
         # Huge hack:
         # >> module A; def foo(a,b,c=1); end; end
@@ -372,9 +381,12 @@ module RubyChecker
         fcall = tree.shift
         check_method_body(block, klass_context, env)
         check_method_body(fcall, klass_context, env)
-      when :bmethod
-        # No idea what this is
-        check_method_body(tree.shift, klass_context, env) while tree.length > 0
+      when :bmethod, :dot2, :dot3
+        # No idea what there are
+        while tree.length > 0
+          component = tree.shift
+          check_method_body(component, klass_context, env) if component
+        end
       when :call, :attrasgn
         # [:call, [:gvar, :$!]
         # [[:const, :Logger], :new, [:array, [:const, :STDERR]]]
@@ -418,7 +430,14 @@ module RubyChecker
         $log.debug('TODO: look for defined constants')
         tree.shift
       when :cvar
+        # Class variable
         expect(tree.shift) { |value| value.kind_of?(Symbol) && value.to_s.start_with?('@@') }
+      when :cvasgn
+        # Class variable assign
+        name = tree.shift
+        target = tree.shift
+        expect(name) { |value| value.kind_of?(Symbol) && value.to_s.start_with?('@@') }
+        check_method_body(target, klass_context, env) while tree.length > 0
       when :dasgn, :dasgn_curr, :dvar
         # Not really sure what these are
         # [:defn, :find, [:scope, [:block, [:args, :glob], [:iter, [:call, [:ivar, :@gemspecs], :find], [:dasgn_curr, :spec], [:fcall, :matching_file?, [:array, [:dvar, :spec], [:lvar, :glob]]]]]]]
@@ -427,7 +446,19 @@ module RubyChecker
       when :defined, :not
         value = tree.shift
         check_method_body(value, klass_context, env)
-      when :dregx
+      when :defn
+        $log.warn('Dynamically defined method encountered')
+        name = tree.shift
+        body = tree.shift
+        check_method_body(body, klass_context, env)
+      when :defs
+        target = tree.shift
+        name = tree.shift
+        body = tree.shift
+        check_method_body(target, true, env)
+        # Don't check the body because it's in some other random
+        # object's scope
+      when :dregx, :dregx_once
         # Not really sure what an integer here means
         # [:dregx, "^", [:evstr, [:lvar, :gem_pattern]], 1]
         while tree.length > 0
@@ -485,7 +516,7 @@ module RubyChecker
         body = tree.shift
         check_method_body(value, klass_context, env)
         check_method_body(holder, klass_context, env) if holder
-        check_method_body(body, klass_context, env)
+        check_method_body(body, klass_context, env) if body
       when :gasgn
         # Global assign
         name = tree.shift
@@ -557,6 +588,15 @@ module RubyChecker
       when :return
         value = tree.shift
         check_method_body(value, klass_context, env) if value
+      when :sclass
+        # >> class A; def foo; class << self; end; end; end
+        # => nil
+        # >> ParseTree.translate A, :foo
+        # => [:defn, :foo, [:scope, [:block, [:args], [:sclass, [:self], [:scope]]]]]
+        name = tree.shift
+        body = tree.shift
+        check_method_body(name, klass_context, env)
+        # body is some other environment. TODO: could do some more work here
       when :scope
         check_method_body(tree.shift, klass_context, env)
       when :self, :zarray
@@ -604,7 +644,7 @@ module RubyChecker
         # TODO: figure out what this is actually used for
         expect(tree.shift) { |value| value == true || value == false }
         check_method_body(condition, klass_context, env)
-        check_method_body(body, klass_context, env)
+        check_method_body(body, klass_context, env) if body
       when :zsuper
         # Dunno what this is
       else
