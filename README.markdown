@@ -1,20 +1,21 @@
-Ruby-static-checker
-===================
+Ruby-static-checker (a simple Ruby bugfinding tool)
+===================================================
 
-It drives me crazy that the my most common bug in Ruby is a name
+It drives me crazy that my most common bug in Ruby is a name
 error. Maybe I typo a variable, or maybe I rename a class name in
 every location except for one, or maybe a cosmic ray flips a bit in my
 source before I commit. These are all mistakes that would be caught in
 a more static language like C or Java.
 
-But there's no inherent reason we can't have a static checker to catch
-these sorts of bugs. Because Ruby is so dynamic, it is impossible to
-write a checker with 100% accuracy (you'll always be able to write
-byzantine programs that do crazy method redefinitions at runtime). But
-given a reasonable codebase, you should be able to write a tool to
-find name errors with a reasonable amount of certainty.
+As ruby-static-checker shows, there's no inherent reason we can't have
+a static checker to help catch these sorts of bugs. Because Ruby is so
+dynamic, it is impossible to write a checker with 100% accuracy
+(you'll always be able to write byzantine programs that do crazy
+method redefinitions at runtime). But given a reasonable codebase, you
+should be able to write a tool to find name errors with a reasonable
+amount of certainty.
 
-Ruby-static-checker is, well, a static analysis tool for
+Ruby-static-checker is a static bugfinding tool for
 Ruby. Ruby-static-checker's goal is to provide a simple set of sanity
 checks (starting with name error detection) for existing codebases
 without requiring any additional programmer work. This means you
