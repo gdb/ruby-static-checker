@@ -27,13 +27,14 @@ require 'parse_tree'
 require File.join(File.dirname(__FILE__), '../lib/ruby-checker')
 
 $log = Logger.new(STDOUT)
-$log.level = Logger::INFO
+$log.level = Logger::WARN
 
 module RubyChecker
   class Error < StandardError; end
   class TreeError < StandardError; end
 
   class Env
+    attr_reader :me
     @@envs = {}
 
     def self.get_and_populate(klass)
@@ -43,10 +44,11 @@ module RubyChecker
     end
 
     def self.get(klass)
-      @@envs[klass] ||= self.new
+      @@envs[klass] ||= self.new(klass)
     end
 
-    def initialize
+    def initialize(me)
+      @me = me
       @instance = {}
       @class = {}
       @superclass = nil
@@ -92,16 +94,18 @@ module RubyChecker
 
     def initialize(path)
       @path = path
+      @builtin_classes = all_classes_to_analyze
     end
 
     def main
+
       load_code
       # build_environments
       check_against_environments
     end
 
     def load_code
-      $log.info("Loading #{@path}")
+      $log.debug("Loading #{@path}")
       require @path
     end
 
@@ -117,8 +121,12 @@ module RubyChecker
     end
 
     def classes_to_analyze
+      all_classes_to_analyze - @builtin_classes
+    end
+
+    def all_classes_to_analyze
       ObjectSpace.each_object.select do |object|
-        object.kind_of?(Class) && object != Object
+        object.kind_of?(Class) || object.kind_of?(Module)
       end
     end
   end
@@ -135,6 +143,14 @@ module RubyChecker
 
     def symbolize(name)
       name == '' ? :nil : name.to_sym
+    end
+
+    def method_call(klass, name, klass_context)
+      if klass_context
+        "#{klass}.#{name}"
+      else
+        "#{klass}<instance>.#{name}"
+      end
     end
   end
 
@@ -155,7 +171,7 @@ module RubyChecker
       end
 
       ast = ParseTree.translate(klass)
-      $log.info("Building enviroment for #{klass.inspect}: #{ast.pretty_inspect}")
+      $log.debug("Building enviroment for #{klass.inspect}: #{ast.pretty_inspect}")
 
       # Should really be doing this functionally. Oh well.
       case type = ast.shift
@@ -241,7 +257,7 @@ module RubyChecker
 
     def self.check_class_against_environment(klass, env)
       ast = ParseTree.translate(klass)
-      $log.info("Checking for name errors for #{klass.inspect}: #{ast.pretty_inspect}")
+      $log.debug("Checking for name errors for #{klass.inspect}: #{ast.pretty_inspect}")
 
       case type = ast.shift
       when :class
@@ -264,7 +280,7 @@ module RubyChecker
     end
 
     def self.check_method_against_environment(ast, env)
-      $log.info("Checking method #{ast.inspect}")
+      $log.debug("Checking method #{ast.inspect}")
 
       case type = ast.shift
       when :defn
@@ -344,7 +360,7 @@ module RubyChecker
       when :call, :attrasgn
         # [:call, [:gvar, :$!]
         # [[:const, :Logger], :new, [:array, [:const, :STDERR]]]
-        $log.warn('TODO: look for undefined method calls')
+        $log.debug('TODO: look for undefined method calls')
         obj = tree.shift
         method = tree.shift
         # arglist
@@ -369,7 +385,7 @@ module RubyChecker
         expect(addr) { |value| value.kind_of?(Numeric) }
         expect(arg) { |value| value.kind_of?(Numeric) }
       when :colon2
-        $log.warn('TODO: look for defined nested constants')
+        $log.debug('TODO: look for defined nested constants')
         nested = tree.shift
         namespace = tree.shift
         check_method_body(nested, klass_context, env)
@@ -378,10 +394,10 @@ module RubyChecker
         # => nil
         # >> ParseTree.translate A, :foo
         # => [:defn, :foo, [:scope, [:block, [:args], [:colon3, :String]]]]
-        $log.warn('TODO: look for defined toplevel constants')
+        $log.debug('TODO: look for defined toplevel constants')
         tree.shift
       when :const
-        $log.warn('TODO: look for defined constants')
+        $log.debug('TODO: look for defined constants')
         tree.shift
       when :cvar
         expect(tree.shift) { |value| value.kind_of?(Symbol) && value.to_s.start_with?('@@') }
@@ -548,10 +564,11 @@ module RubyChecker
       when :vcall, :fcall
         vcall_args = tree
         name = vcall_args.shift
+        call = method_call(env.me, name, klass_context)
         if env.defined?(name, klass_context)
-          $log.info("Calling defined method #{name.inspect}")
+          $log.info "Calling defined method #{call}"
         else
-          $log.warn("Possible name error while calling #{name.inspect}")
+          puts "Possible name error while calling #{call}"
         end
         check_method_body(vcall_args.shift, klass_context, env) while vcall_args.length > 0
       when :when

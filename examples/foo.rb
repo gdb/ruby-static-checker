@@ -23,6 +23,7 @@ module B
 
   def instance_bar
     baz
+    foo
   end
 
   def self.bar
