@@ -39,6 +39,7 @@ module RubyChecker
     @@envs = {}
 
     def self.get_and_populate(klass)
+      raise Error.new("Invalid klass: #{klass.inspect}") unless klass && (klass.kind_of?(Class) || klass.kind_of?(Module))
       env = get(klass)
       Analyzer.build_environment_for_class(klass, env) unless env.populated?
       env
@@ -112,7 +113,8 @@ module RubyChecker
     def builtins
       Set.new([:raise, :Integer, :Array, :warn, :block_given?, :lambda,
                :print, :puts, :sprintf, :eval, :caller, :select, :extend,
-               :include, :require, :loop, :format, :sleep])
+               :include, :require, :loop, :format, :sleep, :catch, :throw,
+               :exec, :fork, :dup, :respond_to?, :object_id, :p])
     end
 
     def builtin_class_methods
@@ -148,7 +150,11 @@ module RubyChecker
 
     def check_against_environments
       classes_to_analyze.each do |klass|
-        Checker.check_for_name_errors(klass)
+        begin
+          Checker.check_for_name_errors(klass)
+        rescue
+          $log.warn("Skipping #{klass.inspect}")
+        end
       end
     end
 
@@ -176,6 +182,14 @@ module RubyChecker
     def symbolize(name)
       name == '' ? :nil : name.to_sym
     end
+
+    def all_methods(klass)
+      klass.methods + klass.protected_methods + klass.private_methods
+    end
+
+    def all_instance_methods(klass)
+      klass.instance_methods + klass.protected_instance_methods + klass.private_instance_methods
+    end
   end
 
   module Analyzer
@@ -188,12 +202,18 @@ module RubyChecker
 
     def self.build_environment_for_class(klass, env)
       # TODO: should probably just do this for everything
-      (['initialize'] + klass.instance_methods).each { |name| env.add_instance_method(name.to_sym) }
-      klass.methods.each { |name| env.add_class_method(name.to_sym) }
+      instance_methods = ['initialize'] + all_instance_methods(klass)
+      instance_methods.each { |name| env.add_instance_method(name.to_sym) }
+      all_methods(klass).each { |name| env.add_class_method(name.to_sym) }
 
       return if klass == Object
 
-      ast = ParseTree.translate(klass)
+      begin
+        ast = ParseTree.translate(klass)
+      rescue
+        $log.error("Could not build AST for #{klass.inspect}")
+        raise
+      end
       $log.debug("Building enviroment for #{klass.inspect}: #{ast.pretty_inspect}")
 
       # Should really be doing this functionally. Oh well.
@@ -343,7 +363,7 @@ module RubyChecker
         # No idea what this is
         # [:defs, [:self], :incompatible_argument_styles, [:scope, [:args, :*]]]
         expect(:*, tree.shift)
-      when :argscat, :op_asgn1
+      when :argscat, :op_asgn1, :op_asgn2
         # No idea what this is
         while tree.length > 0
           case elt = tree.shift
@@ -370,7 +390,8 @@ module RubyChecker
         # [:defn, :datetime_format=, [:attrset, :@datetime_format]]
         expect(tree.shift) { |value| value.kind_of?(Symbol) && value.to_s.start_with?('@') }
       when :back_ref
-        expect(:&, tree.shift)
+        # Not sure what this is
+        expect(tree.shift) { |value| value.kind_of?(Symbol) }
       when :block
         # Huge hack:
         # >> module A; def foo(a,b,c=1); end; end
@@ -515,9 +536,7 @@ module RubyChecker
         # Not really sure what this is
         body = tree.shift
         check_method_body(body, klass_context, env)
-      when :for, :iter
-        # Not actually sure what an iter is, but NODE_ITER and NODE_FOR use
-        # the same code in Ruby
+      when :for
         # >> class A; def foo; for i in j; 2; end; end; end
         # => nil
         # >> ParseTree.translate A, :foo
@@ -528,6 +547,18 @@ module RubyChecker
         check_method_body(value, klass_context, env)
         check_method_body(holder, klass_context, env) if holder
         check_method_body(body, klass_context, env) if body
+      when :iter
+        # >> class A; def foo; bar { puts }; end; end; end
+        # => nil
+        # >> ParseTree.translate A, :foo
+        # => [:defn, :foo, [:scope, [:block, [:args], [:iter, [:fcall, :bar], nil, [:vcall, :puts]]]]]
+        value = tree.shift
+        holder = tree.shift
+        body = tree.shift
+        check_method_body(value, klass_context, env)
+        check_method_body(holder, klass_context, env) if holder
+        # TODO: do something with this block, maybe. Can't really
+        # recurse because who knows where this block will
       when :gasgn
         # Global assign
         name = tree.shift
@@ -626,7 +657,10 @@ module RubyChecker
         # >> ParseTree.translate A, :foo
         # => [:defn, :foo, [:scope, [:block, [:args], [:super, [:array, [:vcall, :a], [:vcall, :b]]]]]]
         arg = tree.shift
+        # I've observed this with yield... not sure what it is
+        second_arg = tree.shift
         check_method_body(arg, klass_context, env) if arg
+        expect(second_arg) { |value| value.nil? || value == true }
       when :to_ary
         arg = tree.shift
         check_method_body(arg, klass_context, env)
